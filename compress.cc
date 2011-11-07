@@ -1,4 +1,3 @@
-#include <memory>
 #include <node.h>
 #include <node_events.h>
 #include <assert.h>
@@ -39,11 +38,23 @@
 using namespace v8;
 using namespace node;
 
+// properly delete a char array in the destructor
 class BufferWrapper {
 public:
-   BufferWrapper(char* b) : buffer(b) { }
-   ~BufferWrapper() { if( buffer ) { delete[] buffer; } }
-   char * buffer;
+  BufferWrapper() : buffer(NULL) { }
+  BufferWrapper(char* b) : buffer(b) { }
+  ~BufferWrapper() { if( buffer ) { delete[] buffer; } }
+  char * buffer;
+};
+
+// free a char array in the destructor, track buffer/length
+class FBuffer {
+public:
+  FBuffer() : buffer(NULL), length(0) { }
+  FBuffer(char* b, int len) : buffer(b), length(len) { }
+  ~FBuffer() { if( buffer ) { free( buffer ); } }
+  char * buffer;
+  int length;
 };
 
 #ifdef  WITH_GZIP
@@ -74,13 +85,13 @@ class Gzip : public EventEmitter {
     return deflateInit2(&strm, level, Z_DEFLATED, 16+MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
   }
 
-  int GzipDeflate(char* data, int data_len, char** out, int* out_len) {
+  int GzipDeflate(char* data, int data_len, FBuffer & out) {
     int ret = 0;
     char* temp;
     int i=1;
 
-    *out = NULL;
-    *out_len = 0;
+    out.buffer = NULL;
+    out.length = 0;
     ret = 0;
 
     while (data_len > 0) {
@@ -92,18 +103,18 @@ class Gzip : public EventEmitter {
 
       strm.next_in = (Bytef*)data;
       do {
-        temp = (char *)realloc(*out, CHUNK*i +1);
+        temp = (char*) realloc(out.buffer, CHUNK*i + 1);
         if (temp == NULL) {
           return Z_MEM_ERROR;
         }
-        *out = temp;
+        out.buffer = temp;
         strm.avail_out = CHUNK;
-        strm.next_out = (Bytef*)*out + *out_len;
+        strm.next_out = (Bytef*) out.buffer + out.length;
         ret = deflate(&strm, Z_NO_FLUSH);
         // former assert
         THROWS_IF_NOT_A (ret != Z_STREAM_ERROR, "GzipDeflate.deflate: %d", ret);  /* state not clobbered */
 
-        *out_len += (CHUNK - strm.avail_out);
+        out.length += (CHUNK - strm.avail_out);
         i++;
       } while (strm.avail_out == 0);
 
@@ -113,29 +124,29 @@ class Gzip : public EventEmitter {
     return ret;
   }
 
-  int GzipEnd(char** out, int* out_len) {
+  int GzipEnd(FBuffer & out) {
     int ret;
     char* temp;
     int i = 1;
 
-    *out = NULL;
-    *out_len = 0;
+    out.buffer = NULL;
+    out.length = 0;
     strm.avail_in = 0;
     strm.next_in = NULL;
 
     do {
-      temp = (char *)realloc(*out, CHUNK*i);
+      temp = (char*) realloc(out.buffer, CHUNK*i);
       if (temp == NULL) {
         return Z_MEM_ERROR;
       }
-      *out = temp;
+      out.buffer = temp;
       strm.avail_out = CHUNK;
-      strm.next_out = (Bytef*)*out + *out_len;
+      strm.next_out = (Bytef*) out.buffer + out.length;
       ret = deflate(&strm, Z_FINISH);
       // former assert
       THROWS_IF_NOT_A (ret != Z_STREAM_ERROR, "GzipEnd.deflate: %d", ret);  /* state not clobbered */
 
-      *out_len += (CHUNK - strm.avail_out);
+      out.length += (CHUNK - strm.avail_out);
       i++;
     } while (strm.avail_out == 0);
 
@@ -191,7 +202,7 @@ class Gzip : public EventEmitter {
     Gzip *gzip = ObjectWrap::Unwrap<Gzip>(args.This());
 
     HandleScope scope;
-    std::auto_ptr<BufferWrapper> bw;
+    BufferWrapper bw;
 
     char* buf;
     ssize_t len;
@@ -207,36 +218,33 @@ class Gzip : public EventEmitter {
       len = DecodeBytes(args[0], enc);
       THROW_IF_NOT_A (len >= 0, "invalid DecodeBytes result: %zd", len);
 
-      buf = new char[len];
-      bw = std::auto_ptr<BufferWrapper>(new BufferWrapper( buf ));
+      bw.buffer = buf = new char[len];
       ssize_t written = DecodeWrite(buf, len, args[0], enc);
       THROW_IF_NOT_A (written == len, "GzipDeflate.DecodeWrite: %zd != %zd", written, len);
     }
 
-    char* out;
-    int r, out_size;
+    FBuffer out;
+    int r;
     try {
-      r = gzip->GzipDeflate(buf, len, &out, &out_size);
+      r = gzip->GzipDeflate(buf, len, out);
     } catch( const std::string & msg ) {
       return ThrowException(Exception::Error (String::New(msg.c_str())));
     }
     THROW_IF_NOT_A (r >= 0, "gzip deflate: error(%d) %s", r, gzip->strm.msg);
-    THROW_IF_NOT_A (out_size >= 0, "gzip deflate: negative output size: %d", out_size);
+    THROW_IF_NOT_A (out.length >= 0, "gzip deflate: negative output size: %d", out.length);
 
     if (gzip->use_buffers) {
       // output compressed data in a buffer
-      Buffer* b = Buffer::New(out_size);
-      if (out_size != 0) {
-        memcpy(BufferData(b), out, out_size);
-        free(out);
+      Buffer* b = Buffer::New(out.length);
+      if (out.length != 0) {
+        memcpy(BufferData(b), out.buffer, out.length);
       }
       return scope.Close(b->handle_);
-    } else if (out_size == 0) {
+    } else if (out.length == 0) {
       return scope.Close(String::Empty());
     } else {
       // output compressed data in a binary string
-      Local<Value> outString = Encode(out, out_size, gzip->encoding);
-      free(out);
+      Local<Value> outString = Encode(out.buffer, out.length, gzip->encoding);
       return scope.Close(outString);
     }
   }
@@ -245,31 +253,28 @@ class Gzip : public EventEmitter {
     Gzip *gzip = ObjectWrap::Unwrap<Gzip>(args.This());
 
     HandleScope scope;
-
-    char* out;
-    int r, out_size;
+    FBuffer out;
+    int r;
     try {
-      r = gzip->GzipEnd(&out, &out_size);
+      r = gzip->GzipEnd(out);
     } catch( const std::string & msg ) {
       return ThrowException(Exception::Error (String::New(msg.c_str())));
     }
     THROW_IF_NOT_A (r >= 0, "gzip end: error(%d) %s", r, gzip->strm.msg);
-    THROW_IF_NOT_A (out_size >= 0, "gzip end: negative output size: %d", out_size);
+    THROW_IF_NOT_A (out.length >= 0, "gzip end: negative output size: %d", out.length);
 
     if (gzip->use_buffers) {
       // output compressed data in a buffer
-      Buffer* b = Buffer::New(out_size);
-      if (out_size != 0) {
-        memcpy(BufferData(b), out, out_size);
-        free(out);
+      Buffer* b = Buffer::New(out.length);
+      if (out.length != 0) {
+        memcpy(BufferData(b), out.buffer, out.length);
       }
       return scope.Close(b->handle_);
-    } else if (out_size == 0) {
+    } else if (out.length == 0) {
       return scope.Close(String::Empty());
     } else {
       // output compressed data in a binary string
-      Local<Value> outString = Encode(out, out_size, gzip->encoding);
-      free(out);
+      Local<Value> outString = Encode(out.buffer, out.length, gzip->encoding);
       return scope.Close(outString);
     }
   }
@@ -315,13 +320,13 @@ class Gunzip : public EventEmitter {
     return inflateInit2(&strm, 16+MAX_WBITS);
   }
 
-  int GunzipInflate(const char* data, int data_len, char** out, int* out_len) {
+  int GunzipInflate(const char* data, int data_len, FBuffer & out) {
     int ret = 0;
     char* temp;
     int i=1;
 
-    *out = NULL;
-    *out_len = 0;
+    out.buffer = NULL;
+    out.length = 0;
 
     while (data_len > 0) {
       if (data_len > CHUNK) {
@@ -333,13 +338,13 @@ class Gunzip : public EventEmitter {
       strm.next_in = (Bytef*)data;
 
       do {
-        temp = (char *)realloc(*out, CHUNK*i);
+        temp = (char*) realloc(out.buffer, CHUNK*i);
         if (temp == NULL) {
           return Z_MEM_ERROR;
         }
-        *out = temp;
+        out.buffer = temp;
         strm.avail_out = CHUNK;
-        strm.next_out = (Bytef*)*out + *out_len;
+        strm.next_out = (Bytef*)out.buffer + out.length;
         ret = inflate(&strm, Z_NO_FLUSH);
         // former assert
         THROWS_IF_NOT_A (ret != Z_STREAM_ERROR, "GunzipInflate.inflate: %d", ret);  /* state not clobbered */
@@ -352,7 +357,7 @@ class Gunzip : public EventEmitter {
           (void)inflateEnd(&strm);
           return ret;
         }
-        *out_len += (CHUNK - strm.avail_out);
+        out.length += (CHUNK - strm.avail_out);
         i++;
       } while (strm.avail_out == 0);
       data += CHUNK;
@@ -403,7 +408,7 @@ class Gunzip : public EventEmitter {
     Gunzip *gunzip = ObjectWrap::Unwrap<Gunzip>(args.This());
 
     HandleScope scope;
-    std::auto_ptr<BufferWrapper> bw;
+    BufferWrapper bw;
 
     char* buf;
     ssize_t len;
@@ -419,36 +424,33 @@ class Gunzip : public EventEmitter {
       len = DecodeBytes(args[0], enc);
       THROW_IF_NOT_A (len >= 0, "invalid DecodeBytes result: %zd", len);
 
-      buf = new char[len];
-      bw = std::auto_ptr<BufferWrapper>(new BufferWrapper( buf ));
+      bw.buffer = buf = new char[len];
       ssize_t written = DecodeWrite(buf, len, args[0], enc);
       THROW_IF_NOT_A (written == len, "GunzipInflate.DecodeWrite: %zd != %zd", written, len);
     }
 
-    char* out;
-    int r, out_size;
+    FBuffer out;
+    int r;
     try {
-      r = gunzip->GunzipInflate(buf, len, &out, &out_size);
+      r = gunzip->GunzipInflate(buf, len, out);
     } catch( const std::string & msg ) {
       return ThrowException(Exception::Error (String::New(msg.c_str())));
     }
     THROW_IF_NOT_A (r >= 0, "gunzip inflate: error(%d) %s", r, gunzip->strm.msg);
-    THROW_IF_NOT_A (out_size >= 0, "gunzip inflate: negative output size: %d", out_size);
+    THROW_IF_NOT_A (out.length >= 0, "gunzip inflate: negative output size: %d", out.length);
 
     if (gunzip->use_buffers) {
       // output decompressed data in a buffer
-      Buffer* b = Buffer::New(out_size);
-      if (out_size != 0) {
-        memcpy(BufferData(b), out, out_size);
-        free(out);
+      Buffer* b = Buffer::New(out.length);
+      if (out.length != 0) {
+        memcpy(BufferData(b), out.buffer, out.length);
       }
       return scope.Close(b->handle_);
-    } else if (out_size == 0) {
+    } else if (out.length == 0) {
       return scope.Close(String::Empty());
     } else {
       // output decompressed data in an encoded string
-      Local<Value> outString = Encode(out, out_size, gunzip->encoding);
-      free(out);
+      Local<Value> outString = Encode(out.buffer, out.length, gunzip->encoding);
       return scope.Close(outString);
     }
   }
@@ -506,13 +508,13 @@ class Bzip : public EventEmitter {
     return BZ2_bzCompressInit(&strm, level, 0, work);
   }
 
-  int BzipDeflate(char* data, int data_len, char** out, int* out_len) {
+  int BzipDeflate(char* data, int data_len, FBuffer & out) {
     int ret = 0;
     char* temp;
     int i=1;
 
-    *out = NULL;
-    *out_len = 0;
+    out.buffer = NULL;
+    out.length = 0;
     ret = 0;
 
     while (data_len > 0) {
@@ -522,20 +524,20 @@ class Bzip : public EventEmitter {
         strm.avail_in = data_len;
       }
 
-      strm.next_in = (char*)data;
+      strm.next_in = data;
       do {
-        temp = (char *)realloc(*out, CHUNK*i +1);
+        temp = (char*) realloc(out.buffer, CHUNK*i + 1);
         if (temp == NULL) {
           return BZ_MEM_ERROR;
         }
-        *out = temp;
+        out.buffer = temp;
         strm.avail_out = CHUNK;
-        strm.next_out = (char*)*out + *out_len;
+        strm.next_out = out.buffer + out.length;
         ret = BZ2_bzCompress(&strm, BZ_RUN);
         // former assert
         THROWS_IF_NOT_A (ret == BZ_RUN_OK, "BzipDeflate.BZ2_bzCompress: %d != BZ_RUN_OK", ret);
 
-        *out_len += (CHUNK - strm.avail_out);
+        out.length += (CHUNK - strm.avail_out);
         i++;
       } while (strm.avail_out == 0);
 
@@ -545,30 +547,30 @@ class Bzip : public EventEmitter {
     return ret;
   }
 
-  int BzipEnd(char** out, int* out_len) {
+  int BzipEnd(FBuffer & out) {
     int ret;
     char* temp;
     int i = 1;
 
-    *out = NULL;
-    *out_len = 0;
+    out.buffer = NULL;
+    out.length = 0;
     strm.avail_in = 0;
     strm.next_in = NULL;
 
     do {
-      temp = (char *)realloc(*out, CHUNK*i);
+      temp = (char*) realloc(out.buffer, CHUNK*i);
       if (temp == NULL) {
         return Z_MEM_ERROR;
       }
-      *out = temp;
+      out.buffer = temp;
       strm.avail_out = CHUNK;
-      strm.next_out = (char*)*out + *out_len;
+      strm.next_out = out.buffer + out.length;
       ret = BZ2_bzCompress(&strm, BZ_FINISH);
       // former assert
       THROWS_IF_NOT_A (ret == BZ_FINISH_OK || ret == BZ_STREAM_END,
                        "BzipEnd.BZ2_bzCompress: %d != BZ_FINISH_OK || BZ_STREAM_END", ret);
 
-      *out_len += (CHUNK - strm.avail_out);
+      out.length += (CHUNK - strm.avail_out);
       i++;
     } while (strm.avail_out == 0);
 
@@ -627,7 +629,7 @@ class Bzip : public EventEmitter {
     Bzip *bzip = ObjectWrap::Unwrap<Bzip>(args.This());
 
     HandleScope scope;
-    std::auto_ptr<BufferWrapper> bw;
+    BufferWrapper bw;
 
     char* buf;
     ssize_t len;
@@ -643,36 +645,33 @@ class Bzip : public EventEmitter {
       len = DecodeBytes(args[0], enc);
       THROW_IF_NOT_A (len >= 0, "invalid DecodeBytes result: %zd", len);
 
-      buf = new char[len];
-      bw = std::auto_ptr<BufferWrapper>(new BufferWrapper( buf ));
+      bw.buffer = buf = new char[len];
       ssize_t written = DecodeWrite(buf, len, args[0], enc);
       THROW_IF_NOT_A (written == len, "BzipDeflate.DecodeWrite: %zd != %zd", written, len);
     }
 
-    char* out;
-    int r, out_size;
+    FBuffer out;
+    int r;
     try {
-      r = bzip->BzipDeflate(buf, len, &out, &out_size);
+      r = bzip->BzipDeflate(buf, len, out);
     } catch( const std::string & msg ) {
       return ThrowException(Exception::Error (String::New(msg.c_str())));
     }
     THROW_IF_NOT_A (r >= 0, "bzip deflate: error(%d)", r);
-    THROW_IF_NOT_A (out_size >= 0, "bzip deflate: negative output size: %d", out_size);
+    THROW_IF_NOT_A (out.length >= 0, "bzip deflate: negative output size: %d", out.length);
 
     if (bzip->use_buffers) {
       // output compressed data in a buffer
-      Buffer* b = Buffer::New(out_size);
-      if (out_size != 0) {
-        memcpy(BufferData(b), out, out_size);
-        free(out);
+      Buffer* b = Buffer::New(out.length);
+      if (out.length != 0) {
+        memcpy(BufferData(b), out.buffer, out.length);
       }
       return scope.Close(b->handle_);
-    } else if (out_size == 0) {
+    } else if (out.length == 0) {
       return scope.Close(String::Empty());
     } else {
       // output compressed data in a binary string
-      Local<Value> outString = Encode(out, out_size, bzip->encoding);
-      free(out);
+      Local<Value> outString = Encode(out.buffer, out.length, bzip->encoding);
       return scope.Close(outString);
     }
   }
@@ -681,31 +680,28 @@ class Bzip : public EventEmitter {
     Bzip *bzip = ObjectWrap::Unwrap<Bzip>(args.This());
 
     HandleScope scope;
-
-    char* out;
-    int r, out_size;
+    FBuffer out;
+    int r;
     try {
-      r = bzip->BzipEnd(&out, &out_size);
+      r = bzip->BzipEnd(out);
     } catch( const std::string & msg ) {
       return ThrowException(Exception::Error (String::New(msg.c_str())));
     }
     THROW_IF_NOT_A (r >= 0, "bzip end: error(%d)", r);
-    THROW_IF_NOT_A (out_size >= 0, "bzip end: negative output size: %d", out_size);
+    THROW_IF_NOT_A (out.length >= 0, "bzip end: negative output size: %d", out.length);
 
     if (bzip->use_buffers) {
       // output compressed data in a buffer
-      Buffer* b = Buffer::New(out_size);
-      if (out_size != 0) {
-        memcpy(BufferData(b), out, out_size);
-        free(out);
+      Buffer* b = Buffer::New(out.length);
+      if (out.length != 0) {
+        memcpy(BufferData(b), out.buffer, out.length);
       }
       return scope.Close(b->handle_);
-    } else if (out_size == 0) {
+    } else if (out.length == 0) {
       return scope.Close(String::Empty());
     } else {
       // output compressed data in a binary string
-      Local<Value> outString = Encode(out, out_size, bzip->encoding);
-      free(out);
+      Local<Value> outString = Encode(out.buffer, out.length, bzip->encoding);
       return scope.Close(outString);
     }
   }
@@ -750,13 +746,13 @@ class Bunzip : public EventEmitter {
     return BZ2_bzDecompressInit(&strm, 0, small);
   }
 
-  int BunzipInflate(const char* data, int data_len, char** out, int* out_len) {
+  int BunzipInflate(char* data, int data_len, FBuffer & out) {
     int ret = 0;
     char* temp;
     int i=1;
 
-    *out = NULL;
-    *out_len = 0;
+    out.buffer = NULL;
+    out.length = 0;
 
     while (data_len > 0) {
       if (data_len > CHUNK) {
@@ -765,16 +761,16 @@ class Bunzip : public EventEmitter {
         strm.avail_in = data_len;
       }
 
-      strm.next_in = (char*)data;
+      strm.next_in = data;
 
       do {
-        temp = (char *)realloc(*out, CHUNK*i);
+        temp = (char*) realloc(out.buffer, CHUNK*i);
         if (temp == NULL) {
           return BZ_MEM_ERROR;
         }
-        *out = temp;
+        out.buffer = temp;
         strm.avail_out = CHUNK;
-        strm.next_out = (char*)*out + *out_len;
+        strm.next_out = out.buffer + out.length;
         ret = BZ2_bzDecompress(&strm);
         switch (ret) {
         case BZ_PARAM_ERROR:
@@ -785,7 +781,7 @@ class Bunzip : public EventEmitter {
           BZ2_bzDecompressEnd(&strm);
           return ret;
         }
-        *out_len += (CHUNK - strm.avail_out);
+        out.length += (CHUNK - strm.avail_out);
         i++;
       } while (strm.avail_out == 0);
       data += CHUNK;
@@ -841,7 +837,7 @@ class Bunzip : public EventEmitter {
     Bunzip *bunzip = ObjectWrap::Unwrap<Bunzip>(args.This());
 
     HandleScope scope;
-    std::auto_ptr<BufferWrapper> bw;
+    BufferWrapper bw;
 
     char* buf;
     ssize_t len;
@@ -857,36 +853,33 @@ class Bunzip : public EventEmitter {
       len = DecodeBytes(args[0], enc);
       THROW_IF_NOT_A (len >= 0, "invalid DecodeBytes result: %zd", len);
 
-      buf = new char[len];
-      bw = std::auto_ptr<BufferWrapper>(new BufferWrapper( buf ));
+      bw.buffer = buf = new char[len];
       ssize_t written = DecodeWrite(buf, len, args[0], enc);
       THROW_IF_NOT_A(written == len, "BunzipInflate.DecodeWrite: %zd != %zd", written, len);
     }
 
-    char* out;
-    int r, out_size;
+    FBuffer out;
+    int r;
     try {
-      r = bunzip->BunzipInflate(buf, len, &out, &out_size);
+      r = bunzip->BunzipInflate(buf, len, out);
     } catch( const std::string & msg ) {
       return ThrowException(Exception::Error (String::New(msg.c_str())));
     }
     THROW_IF_NOT_A (r >= 0, "bunzip inflate: error(%d)", r);
-    THROW_IF_NOT_A (out_size >= 0, "bunzip inflate: negative output size: %d", out_size);
+    THROW_IF_NOT_A (out.length >= 0, "bunzip inflate: negative output size: %d", out.length);
 
     if (bunzip->use_buffers) {
       // output decompressed data in a buffer
-      Buffer* b = Buffer::New(out_size);
-      if (out_size != 0) {
-        memcpy(BufferData(b), out, out_size);
-        free(out);
+      Buffer* b = Buffer::New(out.length);
+      if (out.length != 0) {
+        memcpy(BufferData(b), out.buffer, out.length);
       }
       return scope.Close(b->handle_);
-    } else if (out_size == 0) {
+    } else if (out.length == 0) {
       return scope.Close(String::Empty());
     } else {
       // output decompressed data in an encoded string
-      Local<Value> outString = Encode(out, out_size, bunzip->encoding);
-      free(out);
+      Local<Value> outString = Encode(out.buffer, out.length, bunzip->encoding);
       return scope.Close(outString);
     }
   }
@@ -917,15 +910,18 @@ class Bunzip : public EventEmitter {
 };
 #endif//WITH_BZIP
 
-extern "C" void init(Handle<Object> target) {
-  HandleScope scope;
-  #ifdef  WITH_BZIP
-  Gzip::Initialize(target);
-  Gunzip::Initialize(target);
-  #endif//WITH_GZIP
+extern "C" {
+  static void init(Handle<Object> target) {
+    HandleScope scope;
+    #ifdef  WITH_GZIP
+    Gzip::Initialize(target);
+    Gunzip::Initialize(target);
+    #endif//WITH_GZIP
 
-  #ifdef  WITH_BZIP
-  Bzip::Initialize(target);
-  Bunzip::Initialize(target);
-  #endif//WITH_BZIP
+    #ifdef  WITH_BZIP
+    Bzip::Initialize(target);
+    Bunzip::Initialize(target);
+    #endif//WITH_BZIP
+  }
+  NODE_MODULE(gzbz2, init);
 }
