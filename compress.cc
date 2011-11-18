@@ -23,14 +23,14 @@
       return ThrowException(Exception::Error (String::New(text))); \
     }
 #define THROW_IF_NOT_A(condition,...) if (!(condition)) { \
-   char bufname[128] = {0}; \
-   sprintf(bufname, __VA_ARGS__); \
+   char bufname[128]; \
+   snprintf(bufname, 128, __VA_ARGS__); \
    return ThrowException(Exception::Error (String::New(bufname))); \
    }
 
 #define THROWS_IF_NOT_A(condition,...) if (!(condition)) { \
-   char bufname[128] = {0}; \
-   sprintf(bufname, __VA_ARGS__); \
+   char bufname[128]; \
+   snprintf(bufname, 128, __VA_ARGS__); \
    throw std::string(bufname); \
    }
 
@@ -237,6 +237,7 @@ class Gzip : public ObjectWrap {
     if (gzip->use_buffers) {
       // output compressed data in a buffer
       Buffer* b = Buffer::New(out.length);
+      THROW_IF_NOT_A (b != NULL, "gzip deflate: failed buffer allocation: %u", out.length);
       if (out.length != 0) {
         memcpy(BufferData(b), out.buffer, out.length);
       }
@@ -267,6 +268,7 @@ class Gzip : public ObjectWrap {
     if (gzip->use_buffers) {
       // output compressed data in a buffer
       Buffer* b = Buffer::New(out.length);
+      THROW_IF_NOT_A (b != NULL, "gzip end: failed buffer allocation: %u", out.length);
       if (out.length != 0) {
         memcpy(BufferData(b), out.buffer, out.length);
       }
@@ -447,6 +449,7 @@ class Gunzip : public ObjectWrap {
     if (gunzip->use_buffers) {
       // output decompressed data in a buffer
       Buffer* b = Buffer::New(out.length);
+      THROW_IF_NOT_A (b != NULL, "gunzip inflate: failed buffer allocation: %u", out.length);
       if (out.length != 0) {
         memcpy(BufferData(b), out.buffer, out.length);
       }
@@ -673,6 +676,7 @@ class Bzip : public ObjectWrap {
     if (bzip->use_buffers) {
       // output compressed data in a buffer
       Buffer* b = Buffer::New(out.length);
+      THROW_IF_NOT_A (b != NULL, "bzip deflate: failed buffer allocation: %u", out.length);
       if (out.length != 0) {
         memcpy(BufferData(b), out.buffer, out.length);
       }
@@ -703,6 +707,7 @@ class Bzip : public ObjectWrap {
     if (bzip->use_buffers) {
       // output compressed data in a buffer
       Buffer* b = Buffer::New(out.length);
+      THROW_IF_NOT_A (b != NULL, "bzip end: failed buffer allocation: %u", out.length);
       if (out.length != 0) {
         memcpy(BufferData(b), out.buffer, out.length);
       }
@@ -885,6 +890,7 @@ class Bunzip : public ObjectWrap {
     if (bunzip->use_buffers) {
       // output decompressed data in a buffer
       Buffer* b = Buffer::New(out.length);
+      THROW_IF_NOT_A (b != NULL, "bunzip inflate: failed buffer allocation: %u", out.length);
       if (out.length != 0) {
         memcpy(BufferData(b), out.buffer, out.length);
       }
