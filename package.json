@@ -14,17 +14,12 @@
     "type": "git",
     "url": "git://github.com/woodya/node-gzbz2.git"
   },
-  "main": "build/Release/gzbz2",
-  "directories.lib": "build/Release/",
   "scripts": {
-    "build": "node-waf configure build",
-    "test": "node-waf test",
-    "doc": "node-waf doc",
-    "preinstall": "node-waf clean || true; node-waf configure build"
+    "postdeploy": "cp ./build/Release/gzbz2.so ./gzbz2.node"
   },
-  "dependencies": {},
-  "devDependencies": {},
+  "main": "./gzbz2.node",
   "engines": {
-    "node": ">=0.4.0"
+    "node": ">=0.8.0"
   }
 }
+
