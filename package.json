@@ -5,10 +5,10 @@
   "bugs": {
     "url": "http://github.com/woodya/node-gzbz2/issues"
   },
-  "version": "0.1.4",
+  "version": "0.1.5",
   "author": "Woody Anderson <woody.anderson@gmail.com>",
   "contributors": [
-    "wave.to"
+    "wave.to", "OrangeDog"
   ],
   "repository": {
     "type": "git",
